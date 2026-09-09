@@ -3,16 +3,14 @@ import pandas as pd
 import numpy as np
 from io import BytesIO
 from pathlib import Path
-from datetime import date
+from datetime import date, timedelta
+import tempfile
+import os
 
-# =========================================================
-# PO PENDING DASHBOARD
-# DAILY UPLOADS:
-#   1. PO Pending Excel
-#   2. Schedule Date Excel
-# FIXED MASTER:
-#   BARCODE STATUS.xlsx in the same folder as this app.py
-# =========================================================
+
+# ============================================================
+# PAGE CONFIG
+# ============================================================
 
 st.set_page_config(
     page_title="PO Pending Dashboard",
@@ -20,19 +18,71 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("📊 PO PENDING DASHBOARD")
-st.caption("Upload the daily PO Pending and Schedule Date files. Barcode Status is read from the fixed master file.")
 
-# =========================================================
-# FIXED BARCODE MASTER PATH
-# =========================================================
+# ============================================================
+# APP FOLDER
+# ============================================================
 
 APP_FOLDER = Path(__file__).resolve().parent
-MASTER_BARCODE_FILE = APP_FOLDER / "BARCODE STATUS.xlsx"
 
-# =========================================================
-# OUTPUT COLUMNS
-# =========================================================
+BARCODE_MASTER_FILE = APP_FOLDER / "BARCODE STATUS.xlsx"
+
+
+# ============================================================
+# CSS
+# ============================================================
+
+st.markdown(
+    """
+    <style>
+
+    .main-title {
+        font-size: 30px;
+        font-weight: 700;
+        margin-bottom: 0px;
+    }
+
+    .sub-title {
+        font-size: 14px;
+        color: #666;
+        margin-top: 0px;
+        margin-bottom: 20px;
+    }
+
+    div[data-testid="stMetric"] {
+        border: 1px solid #dddddd;
+        padding: 10px;
+        border-radius: 8px;
+        background-color: #fafafa;
+    }
+
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+
+# ============================================================
+# TITLE
+# ============================================================
+
+st.markdown(
+    '<div class="main-title">📊 PO Pending Dashboard</div>',
+    unsafe_allow_html=True
+)
+
+updated_till = date.today() - timedelta(days=1)
+
+st.markdown(
+    f'<div class="sub-title">Updated Till: '
+    f'{updated_till.strftime("%d-%b-%Y")}</div>',
+    unsafe_allow_html=True
+)
+
+
+# ============================================================
+# FINAL COLUMNS
+# ============================================================
 
 FINAL_COLUMNS = [
     "ORDER NO.BARCODE",
@@ -86,428 +136,1439 @@ FINAL_COLUMNS = [
     "DELAY GROUP2"
 ]
 
-# =========================================================
+
+# ============================================================
 # HELPERS
-# =========================================================
+# ============================================================
 
 def clean_text(value):
+
     if pd.isna(value):
         return ""
+
     return str(value).strip()
 
+
 def normalize_columns(df):
-    df = df.copy()
-    df.columns = [str(c).strip() for c in df.columns]
+
+    df.columns = [
+        str(col).strip()
+        for col in df.columns
+    ]
+
     return df
 
+
+# ============================================================
+# READ PO FILE
+# ============================================================
+
+@st.cache_data(show_spinner=False)
 def read_po_file(file):
-    # The supplied PO report has the actual header on Excel row 3.
-    df = pd.read_excel(file, sheet_name="PO PENDING", skiprows=2)
+
+    df = pd.read_excel(
+        file,
+        sheet_name="PO PENDING",
+        skiprows=2
+    )
+
     df = normalize_columns(df)
-    df = df.dropna(how="all")
+
+    df = df.dropna(
+        how="all"
+    )
+
+    return df
+
+
+# ============================================================
+# READ SCHEDULE FILE
+# ============================================================
+
+@st.cache_data(show_spinner=False)
+def read_schedule_file(file):
+
+    df = pd.read_excel(
+        file,
+        sheet_name="SCHEDULE DATE"
+    )
+
+    df = normalize_columns(df)
 
     required = [
-        "DIVISION", "CAT-2", "VENDOR NAME", "VENDOR ID", "VENDOR CITY",
-        "ORDER DATE", "ORDER NO.", "ORDER REMARKS", "PREPARED BY",
-        "ATTRIBUTE1", "SECTION", "DEPARTMENT", "ARTCLE NAME",
-        "CAT-1", "CAT-3", "CAT-4", "CAT-5", "CAT-6",
-        "DESC1", "DESC2", "DESC3", "DESC4", "OUTER PACK",
-        "DESC5", "DESC6", "SEASON", "STANDARD RATE", "LAST IN RATE",
-        "ORDER RATE", "MRP", "HSN CODE", "REF_BAR", "BARCODE",
-        "ORDER QTY", "RECEIVED QTY", "CANCELLED QTY", "PENDING QTY"
+        "ORDER NO",
+        "SCHEDULE DATE"
     ]
 
-    missing = [c for c in required if c not in df.columns]
+    missing = [
+        col
+        for col in required
+        if col not in df.columns
+    ]
+
     if missing:
+
         raise ValueError(
-            "These columns are missing in the PO Pending file: "
+            "Schedule file missing columns: "
             + ", ".join(missing)
         )
 
-    return df
+    df["ORDER NO"] = (
+        df["ORDER NO"]
+        .apply(clean_text)
+    )
 
-def read_schedule_file(file):
-    df = pd.read_excel(file, sheet_name="SCHEDULE DATE")
-    df = normalize_columns(df)
-    df = df.dropna(how="all")
-
-    required = ["ORDER NO", "SCHEDULE DATE"]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise ValueError(
-            "These columns are missing in the Schedule Date file: "
-            + ", ".join(missing)
-        )
-
-    df["ORDER NO"] = df["ORDER NO"].map(clean_text)
     df["SCHEDULE DATE"] = pd.to_datetime(
-        df["SCHEDULE DATE"], errors="coerce"
+        df["SCHEDULE DATE"],
+        errors="coerce"
     )
 
-    # Prevent duplicate ORDER NO rows from multiplying PO records.
-    df = (
-        df.sort_values("SCHEDULE DATE")
-        .drop_duplicates(subset=["ORDER NO"], keep="last")
+    df = df.sort_values(
+        "SCHEDULE DATE"
     )
 
-    return df[["ORDER NO", "SCHEDULE DATE"]]
+    df = df.drop_duplicates(
+        subset=["ORDER NO"],
+        keep="last"
+    )
 
-def read_barcode_master(path):
-    df = pd.read_excel(path)
+    return df[
+        ["ORDER NO", "SCHEDULE DATE"]
+    ]
+
+
+# ============================================================
+# READ BARCODE MASTER
+# ============================================================
+
+@st.cache_data(show_spinner=False)
+def read_barcode_master(file_path):
+
+    df = pd.read_excel(
+        file_path
+    )
+
     df = normalize_columns(df)
-    df = df.dropna(how="all")
 
-    required = ["BARCODE", "BRCD STATUS"]
-    missing = [c for c in required if c not in df.columns]
+    required = [
+        "BARCODE",
+        "BRCD STATUS"
+    ]
+
+    missing = [
+        col
+        for col in required
+        if col not in df.columns
+    ]
+
     if missing:
+
         raise ValueError(
-            "Barcode Status master must contain: BARCODE and BRCD STATUS"
+            "Barcode master missing columns: "
+            + ", ".join(missing)
         )
 
-    df["BARCODE"] = df["BARCODE"].map(clean_text)
-    df["BRCD STATUS"] = df["BRCD STATUS"].astype(str).str.strip()
+    df["BARCODE"] = (
+        df["BARCODE"]
+        .apply(clean_text)
+    )
 
-    df = df.drop_duplicates(subset=["BARCODE"], keep="last")
+    df["BRCD STATUS"] = (
+        df["BRCD STATUS"]
+        .fillna("NOT FOUND")
+        .astype(str)
+        .str.strip()
+    )
 
-    return df[["BARCODE", "BRCD STATUS"]]
+    df = df.drop_duplicates(
+        subset=["BARCODE"],
+        keep="last"
+    )
 
-def make_delay_group(expire_days):
+    return df[
+        ["BARCODE", "BRCD STATUS"]
+    ]
+
+
+# ============================================================
+# DELAY GROUP
+# ============================================================
+
+def get_delay_group(expire_days):
+
     if pd.isna(expire_days):
         return "NO DELIVERY DATE"
+
     if expire_days <= 0:
         return "NOT EXPIRED"
-    if expire_days <= 7:
-        return "1-7 DAYS"
-    if expire_days <= 15:
-        return "8-15 DAYS"
-    if expire_days <= 30:
-        return "16-30 DAYS"
-    if expire_days <= 60:
-        return "31-60 DAYS"
-    if expire_days <= 90:
-        return "61-90 DAYS"
-    return "90+ DAYS"
 
-def make_delay_group2(expire_days):
+    elif expire_days <= 7:
+        return "1-7 DAYS"
+
+    elif expire_days <= 15:
+        return "8-15 DAYS"
+
+    elif expire_days <= 30:
+        return "16-30 DAYS"
+
+    elif expire_days <= 60:
+        return "31-60 DAYS"
+
+    elif expire_days <= 90:
+        return "61-90 DAYS"
+
+    else:
+        return "90+ DAYS"
+
+
+# ============================================================
+# DELAY GROUP 2
+# ============================================================
+
+def get_delay_group2(expire_days):
+
     if pd.isna(expire_days):
         return "NO DELIVERY DATE"
+
     if expire_days <= 0:
         return "NOT DUE"
+
     return "EXPIRED"
 
-def create_final_data(po_df, schedule_df, barcode_df):
+
+# ============================================================
+# CREATE FINAL DATA
+# ============================================================
+
+def create_final_data(
+    po_df,
+    schedule_df,
+    barcode_df
+):
+
     df = po_df.copy()
 
-    # -----------------------------------------------------
-    # Rename CAT-2 to BRAND
-    # -----------------------------------------------------
-    df = df.rename(columns={"CAT-2": "BRAND"})
+    # --------------------------------------------------------
+    # BRAND
+    # --------------------------------------------------------
 
-    # -----------------------------------------------------
-    # Normalize merge keys
-    # -----------------------------------------------------
-    df["ORDER NO."] = df["ORDER NO."].map(clean_text)
-    df["BARCODE"] = df["BARCODE"].map(clean_text)
+    if "CAT-2" in df.columns:
 
-    # -----------------------------------------------------
-    # SCHEDULE DATE = DELIVERY DATE
-    # Merge using ORDER NO.
-    # -----------------------------------------------------
-    df = df.merge(
-        schedule_df,
-        how="left",
-        left_on="ORDER NO.",
-        right_on="ORDER NO"
-    )
+        if "BRAND" in df.columns:
 
-    df = df.drop(columns=["ORDER NO"], errors="ignore")
-    df = df.rename(columns={"SCHEDULE DATE": "DELIVERY DATE"})
+            df["BRAND"] = df["CAT-2"]
 
-    # -----------------------------------------------------
-    # BARCODE STATUS
-    # -----------------------------------------------------
-    df = df.merge(
-        barcode_df,
-        how="left",
-        on="BARCODE"
-    )
+        else:
 
-    df["BRCD STATUS"] = df["BRCD STATUS"].fillna("NOT FOUND")
+            df.rename(
+                columns={
+                    "CAT-2": "BRAND"
+                },
+                inplace=True
+            )
 
-    # -----------------------------------------------------
-    # DATE CONVERSION
-    # -----------------------------------------------------
-    df["ORDER DATE"] = pd.to_datetime(
-        df["ORDER DATE"], errors="coerce"
-    )
+    # --------------------------------------------------------
+    # REQUIRED COLUMNS
+    # --------------------------------------------------------
 
-    df["DELIVERY DATE"] = pd.to_datetime(
-        df["DELIVERY DATE"], errors="coerce"
-    )
-
-    # DELIVERY MNTH
-    df["DELIVERY MNTH"] = df["DELIVERY DATE"].dt.strftime("%b-%Y")
-    df["DELIVERY MNTH"] = df["DELIVERY MNTH"].fillna("NO DATE")
-
-    # -----------------------------------------------------
-    # NUMERIC COLUMNS
-    # -----------------------------------------------------
-    numeric_cols = [
-        "STANDARD RATE", "LAST IN RATE", "ORDER RATE", "MRP",
-        "OUTER PACK", "ORDER QTY", "RECEIVED QTY",
-        "CANCELLED QTY", "PENDING QTY"
+    required = [
+        "ORDER NO.",
+        "BARCODE",
+        "PENDING QTY",
+        "OUTER PACK",
+        "ORDER RATE"
     ]
 
-    for col in numeric_cols:
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    missing = [
+        col
+        for col in required
+        if col not in df.columns
+    ]
 
-    # -----------------------------------------------------
-    # REQUIRED CALCULATIONS
-    # -----------------------------------------------------
+    if missing:
 
-    # ORDER NO.BARCODE
-    df["ORDER NO.BARCODE"] = (
-        df["ORDER NO."].astype(str).str.strip()
-        + "."
-        + df["BARCODE"].astype(str).str.strip()
+        raise ValueError(
+            "PO file missing required columns: "
+            + ", ".join(missing)
+        )
+
+    # --------------------------------------------------------
+    # CLEAN KEYS
+    # --------------------------------------------------------
+
+    df["ORDER NO."] = (
+        df["ORDER NO."]
+        .apply(clean_text)
     )
 
-    # Value calculations
-    df["ORDER VAL"] = df["ORDER QTY"] * df["ORDER RATE"]
-    df["RECEIVED VAL"] = df["RECEIVED QTY"] * df["ORDER RATE"]
-    df["CANCELLED VAL"] = df["CANCELLED QTY"] * df["ORDER RATE"]
-    df["PENDING VAL"] = df["PENDING QTY"] * df["ORDER RATE"]
+    df["BARCODE"] = (
+        df["BARCODE"]
+        .apply(clean_text)
+    )
 
-    # PKT QTY = PENDING QTY / OUTER PACK
+    # --------------------------------------------------------
+    # MERGE SCHEDULE
+    # --------------------------------------------------------
+
+    df = df.merge(
+        schedule_df,
+        left_on="ORDER NO.",
+        right_on="ORDER NO",
+        how="left"
+    )
+
+    df.rename(
+        columns={
+            "SCHEDULE DATE": "DELIVERY DATE"
+        },
+        inplace=True
+    )
+
+    if "ORDER NO" in df.columns:
+
+        df.drop(
+            columns=["ORDER NO"],
+            inplace=True
+        )
+
+    # --------------------------------------------------------
+    # MERGE BARCODE MASTER
+    # --------------------------------------------------------
+
+    df = df.merge(
+        barcode_df,
+        on="BARCODE",
+        how="left"
+    )
+
+    df["BRCD STATUS"] = (
+        df["BRCD STATUS"]
+        .fillna("NOT FOUND")
+        .astype(str)
+        .str.strip()
+    )
+
+    # --------------------------------------------------------
+    # DATES
+    # --------------------------------------------------------
+
+    if "ORDER DATE" in df.columns:
+
+        df["ORDER DATE"] = pd.to_datetime(
+            df["ORDER DATE"],
+            errors="coerce"
+        )
+
+    else:
+
+        df["ORDER DATE"] = pd.NaT
+
+    df["DELIVERY DATE"] = pd.to_datetime(
+        df["DELIVERY DATE"],
+        errors="coerce"
+    )
+
+    # --------------------------------------------------------
+    # DELIVERY MONTH
+    # --------------------------------------------------------
+
+    df["DELIVERY MNTH"] = (
+        df["DELIVERY DATE"]
+        .dt.strftime("%b-%Y")
+    )
+
+    df["DELIVERY MNTH"] = (
+        df["DELIVERY MNTH"]
+        .fillna("NO DATE")
+    )
+
+    # --------------------------------------------------------
+    # NUMERIC COLUMNS
+    # --------------------------------------------------------
+
+    numeric_columns = [
+        "STANDARD RATE",
+        "LAST IN RATE",
+        "ORDER RATE",
+        "MRP",
+        "OUTER PACK",
+        "ORDER QTY",
+        "RECEIVED QTY",
+        "CANCELLED QTY",
+        "PENDING QTY"
+    ]
+
+    for col in numeric_columns:
+
+        if col not in df.columns:
+
+            df[col] = 0
+
+        df[col] = pd.to_numeric(
+            df[col],
+            errors="coerce"
+        ).fillna(0)
+
+    # --------------------------------------------------------
+    # REMOVE ZERO PENDING
+    # --------------------------------------------------------
+
+    df = df[
+        df["PENDING QTY"] > 0
+    ].copy()
+
+    # --------------------------------------------------------
+    # ORDER NO + BARCODE
+    # --------------------------------------------------------
+
+    df["ORDER NO.BARCODE"] = (
+        df["ORDER NO."].astype(str)
+        + "."
+        + df["BARCODE"].astype(str)
+    )
+
+    # --------------------------------------------------------
+    # VALUES
+    # --------------------------------------------------------
+
+    df["ORDER VAL"] = (
+        df["ORDER QTY"]
+        * df["ORDER RATE"]
+    )
+
+    df["RECEIVED VAL"] = (
+        df["RECEIVED QTY"]
+        * df["ORDER RATE"]
+    )
+
+    df["CANCELLED VAL"] = (
+        df["CANCELLED QTY"]
+        * df["ORDER RATE"]
+    )
+
+    df["PENDING VAL"] = (
+        df["PENDING QTY"]
+        * df["ORDER RATE"]
+    )
+
+    # --------------------------------------------------------
+    # PKT QTY
+    # --------------------------------------------------------
+
     df["PKT QTY"] = np.where(
         df["OUTER PACK"] > 0,
-        df["PENDING QTY"] / df["OUTER PACK"],
+        df["PENDING QTY"]
+        / df["OUTER PACK"],
         0
     )
 
-    # EXPIRE DAYS = Today - Delivery Date
-    today = pd.Timestamp(date.today()).normalize()
+    # --------------------------------------------------------
+    # EXPIRE DAYS
+    # --------------------------------------------------------
+
+    today = pd.Timestamp.today().normalize()
+
     df["EXPIRE DAYS"] = (
-        today - df["DELIVERY DATE"].dt.normalize()
+        today - df["DELIVERY DATE"]
     ).dt.days
 
+    # --------------------------------------------------------
     # DELAY GROUPS
-    df["DELAY GROUP"] = df["EXPIRE DAYS"].apply(make_delay_group)
-    df["DELAY GROUP2"] = df["EXPIRE DAYS"].apply(make_delay_group2)
+    # --------------------------------------------------------
 
-    # -----------------------------------------------------
-    # ENSURE ALL OUTPUT COLUMNS EXIST
-    # -----------------------------------------------------
+    df["DELAY GROUP"] = (
+        df["EXPIRE DAYS"]
+        .apply(get_delay_group)
+    )
+
+    df["DELAY GROUP2"] = (
+        df["EXPIRE DAYS"]
+        .apply(get_delay_group2)
+    )
+
+    # --------------------------------------------------------
+    # ADD MISSING COLUMNS
+    # --------------------------------------------------------
+
     for col in FINAL_COLUMNS:
+
         if col not in df.columns:
+
             df[col] = ""
 
-    df = df[FINAL_COLUMNS]
+    # --------------------------------------------------------
+    # FINAL ORDER
+    # --------------------------------------------------------
 
-    # Sort
-    df = df.sort_values(
-        by=["DELIVERY DATE", "DIVISION", "BRAND", "VENDOR NAME"],
-        na_position="last"
-    ).reset_index(drop=True)
+    df = df[
+        FINAL_COLUMNS
+    ]
 
-    return df
+    # --------------------------------------------------------
+    # SORT
+    # --------------------------------------------------------
 
+    sort_columns = [
+        "DIVISION",
+        "SECTION",
+        "DEPARTMENT",
+        "ARTCLE NAME",
+        "BRAND",
+        "DELIVERY DATE"
+    ]
 
-def create_pivot_tables(final_df):
-    """Create Excel-style pivot summary tables from the final data."""
+    available_sort = [
+        col
+        for col in sort_columns
+        if col in df.columns
+    ]
 
-    # Division x Delay Group
-    pivot_division_delay = pd.pivot_table(
-        final_df,
-        index="DIVISION",
-        columns="DELAY GROUP",
-        values="PENDING QTY",
-        aggfunc="sum",
-        fill_value=0,
-        margins=True,
-        margins_name="GRAND TOTAL"
-    )
+    if available_sort:
 
-    # Brand x Delivery Month
-    pivot_brand_month = pd.pivot_table(
-        final_df,
-        index="BRAND",
-        columns="DELIVERY MNTH",
-        values="PENDING QTY",
-        aggfunc="sum",
-        fill_value=0,
-        margins=True,
-        margins_name="GRAND TOTAL"
-    )
-
-    # Vendor summary
-    pivot_vendor = pd.pivot_table(
-        final_df,
-        index=["VENDOR NAME", "BRAND"],
-        values=["ORDER QTY", "RECEIVED QTY", "CANCELLED QTY", "PENDING QTY", "PENDING VAL", "PKT QTY"],
-        aggfunc="sum",
-        fill_value=0,
-        margins=True,
-        margins_name="GRAND TOTAL"
-    )
-
-    # Department x Delay Group
-    pivot_department_delay = pd.pivot_table(
-        final_df,
-        index="DEPARTMENT",
-        columns="DELAY GROUP",
-        values="PENDING QTY",
-        aggfunc="sum",
-        fill_value=0,
-        margins=True,
-        margins_name="GRAND TOTAL"
-    )
-
-    return {
-        "Division x Delay Group": pivot_division_delay,
-        "Brand x Delivery Month": pivot_brand_month,
-        "Vendor Summary": pivot_vendor,
-        "Department x Delay Group": pivot_department_delay,
-    }
-
-
-def create_pivot_excel(final_df):
-    """Create a downloadable workbook containing multiple pivot-style summaries."""
-    output = BytesIO()
-    pivots = create_pivot_tables(final_df)
-
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        for sheet_name, pivot_df in pivots.items():
-            pivot_df.to_excel(writer, sheet_name=sheet_name[:31])
-
-        # Also include source data for reference.
-        final_df.to_excel(
-            writer,
-            sheet_name="Source Data",
-            index=False
+        df = df.sort_values(
+            available_sort,
+            na_position="last"
         )
 
-    output.seek(0)
-    return output.getvalue()
+    return df.reset_index(
+        drop=True
+    )
 
 
-def create_excel_file(final_df):
+# ============================================================
+# HIERARCHY SUMMARY
+# ============================================================
+
+def create_hierarchy_summary(
+    df,
+    hierarchy_column
+):
+
+    if hierarchy_column not in df.columns:
+
+        return pd.DataFrame()
+
+    summary = (
+        df.groupby(
+            hierarchy_column,
+            dropna=False
+        )
+        .agg(
+            {
+                "ORDER QTY": "sum",
+                "RECEIVED QTY": "sum",
+                "CANCELLED QTY": "sum",
+                "PENDING QTY": "sum",
+                "PENDING VAL": "sum",
+                "PKT QTY": "sum"
+            }
+        )
+        .reset_index()
+    )
+
+    summary = summary.sort_values(
+        "PENDING QTY",
+        ascending=False
+    )
+
+    return summary
+
+
+# ============================================================
+# CREATE FINAL EXCEL
+# ============================================================
+
+def create_final_excel(df):
+
     output = BytesIO()
 
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        final_df.to_excel(
+    with pd.ExcelWriter(
+        output,
+        engine="openpyxl"
+    ) as writer:
+
+        df.to_excel(
             writer,
             sheet_name="PO PENDING",
             index=False
         )
 
-        # Summary by Division
-        division_summary = (
-            final_df.groupby("DIVISION", dropna=False)
-            .agg(
-                **{
-                    "ORDER QTY": ("ORDER QTY", "sum"),
-                    "RECEIVED QTY": ("RECEIVED QTY", "sum"),
-                    "CANCELLED QTY": ("CANCELLED QTY", "sum"),
-                    "PENDING QTY": ("PENDING QTY", "sum"),
-                    "PENDING VAL": ("PENDING VAL", "sum"),
-                    "PKT QTY": ("PKT QTY", "sum")
-                }
-            )
-            .reset_index()
-        )
+        # ----------------------------------------------------
+        # FORMAT ALL SHEETS
+        # APTOS FONT - SIZE 8
+        # ----------------------------------------------------
 
-        division_summary.to_excel(
-            writer,
-            sheet_name="Division Summary",
-            index=False
-        )
+        for worksheet in writer.book.worksheets:
 
-        # Summary by Brand
-        brand_summary = (
-            final_df.groupby("BRAND", dropna=False)
-            .agg(
-                **{
-                    "PENDING QTY": ("PENDING QTY", "sum"),
-                    "PENDING VAL": ("PENDING VAL", "sum"),
-                    "PKT QTY": ("PKT QTY", "sum")
-                }
-            )
-            .reset_index()
-            .sort_values("PENDING QTY", ascending=False)
-        )
+            for row in worksheet.iter_rows():
 
-        brand_summary.to_excel(
-            writer,
-            sheet_name="Brand Summary",
-            index=False
-        )
+                for cell in row:
 
-        # Summary by Vendor
-        vendor_summary = (
-            final_df.groupby("VENDOR NAME", dropna=False)
-            .agg(
-                **{
-                    "PENDING QTY": ("PENDING QTY", "sum"),
-                    "PENDING VAL": ("PENDING VAL", "sum"),
-                    "PKT QTY": ("PKT QTY", "sum")
-                }
-            )
-            .reset_index()
-            .sort_values("PENDING QTY", ascending=False)
-        )
-
-        vendor_summary.to_excel(
-            writer,
-            sheet_name="Vendor Summary",
-            index=False
-        )
+                    cell.font = cell.font.copy(
+                        name="Aptos",
+                        sz=8
+                    )
 
     output.seek(0)
+
     return output.getvalue()
 
-# =========================================================
-# FILE UPLOAD
-# =========================================================
 
-st.sidebar.header("📁 DAILY FILE UPLOAD")
+# ============================================================
+# CREATE LIVE PIVOT EXCEL
+# ============================================================
+
+def create_pivot_excel(df):
+
+    try:
+
+        import win32com.client as win32
+
+    except ImportError:
+
+        raise RuntimeError(
+            "pywin32 is required for Live PivotTable.\n\n"
+            "Run this command in Command Prompt:\n"
+            "pip install pywin32"
+        )
+
+    export_df = df.copy()
+
+    # ========================================================
+    # PIVOT STRUCTURE
+    # ========================================================
+
+    # --------------------------------------------------------
+    # FILTERS
+    # --------------------------------------------------------
+
+    filter_fields = [
+        "DELAY GROUP2",
+        "DIVISION",
+        "ATTRIBUTE1",
+        "DELIVERY MNTH"
+    ]
+
+    # --------------------------------------------------------
+    # ROWS
+    # --------------------------------------------------------
+
+    row_fields = [
+        "VENDOR NAME",
+        "BRAND",
+        "ORDER DATE",
+        "DELIVERY DATE",
+        "ORDER NO.",
+        "ORDER REMARKS",
+        "DEPARTMENT",
+        "ARTCLE NAME",
+        "BARCODE",
+        "REF_BAR",
+        "CAT-1",
+        "ORDER RATE",
+        "MRP",
+        "BRCD STATUS",
+        "DESC4",
+        "OUTER PACK"
+    ]
+
+    # --------------------------------------------------------
+    # VALUES
+    # --------------------------------------------------------
+
+    value_fields = [
+        "ORDER QTY",
+        "RECEIVED QTY",
+        "CANCELLED QTY",
+        "PENDING QTY",
+        "PKT QTY"
+    ]
+
+    # ========================================================
+    # CHECK REQUIRED FIELDS
+    # ========================================================
+
+    all_pivot_fields = (
+        filter_fields
+        + row_fields
+        + value_fields
+    )
+
+    missing_fields = [
+        field
+        for field in all_pivot_fields
+        if field not in export_df.columns
+    ]
+
+    if missing_fields:
+
+        raise RuntimeError(
+            "The following Pivot fields are missing:\n\n"
+            + ", ".join(missing_fields)
+        )
+
+    # ========================================================
+    # FORCE NUMERIC VALUE COLUMNS
+    # ========================================================
+
+    for field in value_fields:
+
+        export_df[field] = pd.to_numeric(
+            export_df[field],
+            errors="coerce"
+        ).fillna(0)
+
+    # ========================================================
+    # CLEAN DATE COLUMNS
+    # ========================================================
+
+    for field in [
+        "ORDER DATE",
+        "DELIVERY DATE"
+    ]:
+
+        export_df[field] = pd.to_datetime(
+            export_df[field],
+            errors="coerce"
+        )
+
+    # ========================================================
+    # CLEAN TEXT COLUMNS
+    # ========================================================
+
+    text_columns = [
+        "DELAY GROUP2",
+        "DIVISION",
+        "ATTRIBUTE1",
+        "DELIVERY MNTH",
+        "VENDOR NAME",
+        "BRAND",
+        "ORDER NO.",
+        "ORDER REMARKS",
+        "DEPARTMENT",
+        "ARTCLE NAME",
+        "BARCODE",
+        "REF_BAR",
+        "CAT-1",
+        "BRCD STATUS",
+        "DESC4"
+    ]
+
+    for field in text_columns:
+
+        export_df[field] = (
+            export_df[field]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+
+    # ========================================================
+    # CREATE TEMP FOLDER
+    # ========================================================
+
+    temp_dir = tempfile.mkdtemp()
+
+    temp_file = os.path.join(
+        temp_dir,
+        "PO_PENDING_WITH_LIVE_PIVOT.xlsx"
+    )
+
+    excel = None
+    workbook = None
+
+    try:
+
+        # ====================================================
+        # WRITE SOURCE EXCEL
+        # ====================================================
+
+        with pd.ExcelWriter(
+            temp_file,
+            engine="openpyxl"
+        ) as writer:
+
+            export_df.to_excel(
+                writer,
+                sheet_name="PO PENDING",
+                index=False
+            )
+
+        # ====================================================
+        # OPEN EXCEL
+        # ====================================================
+
+        excel = win32.DispatchEx(
+            "Excel.Application"
+        )
+
+        excel.Visible = False
+        excel.DisplayAlerts = False
+
+        workbook = excel.Workbooks.Open(
+            os.path.abspath(temp_file)
+        )
+
+        source_sheet = workbook.Worksheets(
+            "PO PENDING"
+        )
+
+        # ====================================================
+        # SOURCE RANGE
+        # ====================================================
+
+        last_row = len(export_df) + 1
+        last_col = len(export_df.columns)
+
+        source_range = source_sheet.Range(
+            source_sheet.Cells(1, 1),
+            source_sheet.Cells(
+                last_row,
+                last_col
+            )
+        )
+
+        # ====================================================
+        # FORMAT SOURCE HEADER
+        # ====================================================
+
+        source_header = source_sheet.Range(
+            source_sheet.Cells(1, 1),
+            source_sheet.Cells(1, last_col)
+        )
+
+        source_header.Font.Bold = True
+
+        # ====================================================
+        # CREATE EXCEL TABLE
+        # ====================================================
+
+        table = None
+
+        try:
+
+            table = source_sheet.ListObjects.Add(
+                1,
+                source_range,
+                None,
+                1
+            )
+
+            table.Name = "POPendingData"
+
+        except Exception:
+
+            table = None
+
+        # ====================================================
+        # REMOVE OLD PIVOT SHEET IF EXISTS
+        # ====================================================
+
+        try:
+
+            for ws in workbook.Worksheets:
+
+                if ws.Name == "PIVOT TABLE":
+
+                    ws.Delete()
+
+                    break
+
+        except Exception:
+
+            pass
+
+        # ====================================================
+        # CREATE PIVOT SHEET
+        # ====================================================
+
+        pivot_sheet = workbook.Worksheets.Add(
+            After=source_sheet
+        )
+
+        pivot_sheet.Name = "PIVOT TABLE"
+
+        # ====================================================
+        # CREATE PIVOT CACHE
+        # ====================================================
+
+        if table is not None:
+
+            pivot_cache = workbook.PivotCaches().Create(
+                SourceType=1,
+                SourceData="POPendingData"
+            )
+
+        else:
+
+            source_address = source_range.Address(
+                True,
+                True,
+                1,
+                True
+            )
+
+            pivot_cache = workbook.PivotCaches().Create(
+                SourceType=1,
+                SourceData=source_address
+            )
+
+        # ====================================================
+        # CREATE PIVOT TABLE
+        # ====================================================
+
+        pivot_destination = pivot_sheet.Range(
+            "A3"
+        )
+
+        pivot_table = pivot_cache.CreatePivotTable(
+            TableDestination=pivot_destination,
+            TableName="POPendingPivot"
+        )
+
+        # ====================================================
+        # PIVOT BASIC SETTINGS
+        # ====================================================
+
+        try:
+
+            pivot_table.ManualUpdate = True
+
+        except Exception:
+
+            pass
+
+        try:
+
+            pivot_table.InGridDropZones = False
+
+        except Exception:
+
+            pass
+
+        try:
+
+            pivot_table.DisplayFieldCaptions = True
+
+        except Exception:
+
+            pass
+
+        # ====================================================
+        # FILTER FIELDS
+        # ====================================================
+
+        for position, field_name in enumerate(
+            filter_fields,
+            start=1
+        ):
+
+            pf = pivot_table.PivotFields(
+                field_name
+            )
+
+            # xlPageField
+            pf.Orientation = 3
+            pf.Position = position
+
+        # ====================================================
+        # ROW FIELDS
+        # ====================================================
+
+        for position, field_name in enumerate(
+            row_fields,
+            start=1
+        ):
+
+            pf = pivot_table.PivotFields(
+                field_name
+            )
+
+            # xlRowField
+            pf.Orientation = 1
+            pf.Position = position
+
+        # ====================================================
+        # REMOVE ALL SUBTOTALS
+        # ====================================================
+
+        for field_name in row_fields:
+
+            try:
+
+                pf = pivot_table.PivotFields(
+                    field_name
+                )
+
+                pf.Subtotals = (
+                    False,
+                    False,
+                    False,
+                    False,
+                    False,
+                    False,
+                    False,
+                    False,
+                    False,
+                    False,
+                    False,
+                    False
+                )
+
+            except Exception:
+
+                pass
+
+        # ====================================================
+        # VENDOR NAME ONLY SUBTOTAL
+        # ====================================================
+
+        try:
+
+            vendor_pf = pivot_table.PivotFields(
+                "VENDOR NAME"
+            )
+
+            vendor_pf.Subtotals = (
+                True,
+                False,
+                False,
+                False,
+                False,
+                False,
+                False,
+                False,
+                False,
+                False,
+                False,
+                False
+            )
+
+        except Exception:
+
+            pass
+
+        # ====================================================
+        # ADD VALUE FIELDS
+        # ====================================================
+
+        for position, field_name in enumerate(
+            value_fields,
+            start=1
+        ):
+
+            try:
+
+                pf = pivot_table.PivotFields(
+                    field_name
+                )
+
+                # xlDataField
+                pf.Orientation = 4
+
+                # xlSum
+                pf.Function = -4157
+
+                pf.Position = position
+
+                # Keep original field caption
+                try:
+
+                    pf.Caption = field_name
+
+                except Exception:
+
+                    pass
+
+                # Number format
+                try:
+
+                    pf.NumberFormat = "#,##0.00"
+
+                except Exception:
+
+                    pass
+
+            except Exception as value_error:
+
+                raise RuntimeError(
+                    f"Unable to add value field "
+                    f"'{field_name}' to PivotTable.\n\n"
+                    f"Excel Error: {value_error}"
+                )
+
+        # ====================================================
+        # TABULAR FORM
+        # ====================================================
+
+        try:
+
+            # xlTabularRow
+            pivot_table.RowAxisLayout(1)
+
+        except Exception:
+
+            pass
+
+        # ====================================================
+        # REPEAT ALL ITEM LABELS
+        # ====================================================
+
+        try:
+
+            # xlRepeatLabels
+            pivot_table.RepeatAllLabels(2)
+
+        except Exception:
+
+            pass
+
+        # ====================================================
+        # VALUES / DATA FIELDS AS COLUMNS
+        # ====================================================
+
+        try:
+
+            data_pivot_field = pivot_table.DataPivotField
+
+            # xlColumnField
+            data_pivot_field.Orientation = 2
+
+        except Exception:
+
+            pass
+
+        # ====================================================
+        # ENABLE COLUMN GRAND TOTAL
+        # ====================================================
+
+        try:
+
+            pivot_table.ColumnGrand = True
+
+        except Exception:
+
+            pass
+
+        # ====================================================
+        # ENABLE ROW GRAND TOTAL
+        # ====================================================
+
+        try:
+
+            pivot_table.RowGrand = True
+
+        except Exception:
+
+            pass
+
+        # ====================================================
+        # REFRESH PIVOT
+        # ====================================================
+
+        try:
+
+            pivot_table.ManualUpdate = False
+
+        except Exception:
+
+            pass
+
+        try:
+
+            pivot_table.RefreshTable()
+
+        except Exception:
+
+            pass
+
+        # ====================================================
+        # REFRESH ON FILE OPEN
+        # ====================================================
+
+        try:
+
+            pivot_cache.RefreshOnFileOpen = True
+
+        except Exception:
+
+            pass
+
+        try:
+
+            pivot_cache.SaveData = True
+
+        except Exception:
+
+            pass
+
+        try:
+
+            pivot_cache.MissingItemsLimit = 0
+
+        except Exception:
+
+            pass
+
+        # ====================================================
+        # FREEZE SOURCE HEADER
+        # ====================================================
+
+        try:
+
+            source_sheet.Activate()
+
+            excel.ActiveWindow.FreezePanes = False
+
+            source_sheet.Range("A2").Select()
+
+            excel.ActiveWindow.FreezePanes = True
+
+        except Exception:
+
+            pass
+
+        # ====================================================
+        # FORMAT SOURCE SHEET
+        # APTOS - SIZE 8
+        # ====================================================
+
+        try:
+
+            source_used_range = source_sheet.UsedRange
+
+            source_used_range.Font.Name = "Aptos"
+            source_used_range.Font.Size = 8
+
+            source_sheet.Columns.AutoFit()
+
+        except Exception:
+
+            pass
+
+        # ====================================================
+        # FORMAT PIVOT SHEET
+        # APTOS - SIZE 8
+        # ====================================================
+
+        try:
+
+            pivot_sheet.Activate()
+
+            pivot_used_range = pivot_sheet.UsedRange
+
+            pivot_used_range.Font.Name = "Aptos"
+            pivot_used_range.Font.Size = 8
+
+            pivot_sheet.Columns.AutoFit()
+
+        except Exception:
+
+            pass
+
+        # ====================================================
+        # FINAL FORMAT - ALL SHEETS
+        # APTOS FONT / SIZE 8
+        # ====================================================
+
+        try:
+
+            for ws in workbook.Worksheets:
+
+                used_range = ws.UsedRange
+
+                used_range.Font.Name = "Aptos"
+                used_range.Font.Size = 8
+
+        except Exception:
+
+            pass
+
+        # ====================================================
+        # SAVE WORKBOOK
+        # ====================================================
+
+        workbook.Save()
+
+        # ====================================================
+        # CLOSE WORKBOOK
+        # ====================================================
+
+        workbook.Close(
+            SaveChanges=True
+        )
+
+        workbook = None
+
+        # ====================================================
+        # QUIT EXCEL
+        # ====================================================
+
+        excel.Quit()
+
+        excel = None
+
+        # ====================================================
+        # READ FINAL FILE
+        # ====================================================
+
+        with open(
+            temp_file,
+            "rb"
+        ) as file:
+
+            file_bytes = file.read()
+
+        return file_bytes
+
+    finally:
+
+        # ====================================================
+        # CLOSE WORKBOOK IF STILL OPEN
+        # ====================================================
+
+        try:
+
+            if workbook is not None:
+
+                workbook.Close(
+                    SaveChanges=False
+                )
+
+        except Exception:
+
+            pass
+
+        # ====================================================
+        # QUIT EXCEL IF STILL RUNNING
+        # ====================================================
+
+        try:
+
+            if excel is not None:
+
+                excel.Quit()
+
+        except Exception:
+
+            pass
+
+        # ====================================================
+        # DELETE TEMP FILE
+        # ====================================================
+
+        try:
+
+            if os.path.exists(temp_file):
+
+                os.remove(temp_file)
+
+        except Exception:
+
+            pass
+
+        try:
+
+            if os.path.exists(temp_dir):
+
+                os.rmdir(temp_dir)
+
+        except Exception:
+
+            pass
+
+
+# ============================================================
+# SIDEBAR
+# ============================================================
+
+st.sidebar.title(
+    "📁 FILE UPLOAD"
+)
+
+
+# ------------------------------------------------------------
+# BARCODE MASTER
+# ------------------------------------------------------------
+
+if not BARCODE_MASTER_FILE.exists():
+
+    st.sidebar.error(
+        "BARCODE STATUS.xlsx not found."
+    )
+
+    st.info(
+        "Place BARCODE STATUS.xlsx in the same folder as app.py."
+    )
+
+    st.stop()
+
+
+# ------------------------------------------------------------
+# UPLOADERS
+# ------------------------------------------------------------
 
 po_file = st.sidebar.file_uploader(
-    "1. Upload PO Pending file",
-    type=["xlsx", "xls"],
-    key="po_file"
+    "Upload PO Pending File",
+    type=["xlsx", "xls"]
 )
 
 schedule_file = st.sidebar.file_uploader(
-    "2. Upload Schedule Date file",
-    type=["xlsx", "xls"],
-    key="schedule_file"
+    "Upload Schedule Date File",
+    type=["xlsx", "xls"]
 )
 
-# =========================================================
-# MAIN PROCESS
-# =========================================================
-
-if not MASTER_BARCODE_FILE.exists():
-    st.error(
-        "BARCODE STATUS.xlsx was not found in the same folder as app.py."
-    )
-    st.info(
-        f"Please place BARCODE STATUS.xlsx here:\n{APP_FOLDER}"
-    )
-    st.stop()
 
 if po_file is None or schedule_file is None:
+
     st.info(
-        "👈 Upload both daily files from the left side to create the final PO Pending data and dashboard."
+        "Please upload both PO Pending File and Schedule Date File."
     )
+
     st.stop()
 
+
+# ============================================================
+# MAIN
+# ============================================================
+
 try:
-    with st.spinner("Processing files..."):
-        po_df = read_po_file(po_file)
-        schedule_df = read_schedule_file(schedule_file)
-        barcode_df = read_barcode_master(MASTER_BARCODE_FILE)
+
+    # ========================================================
+    # READ FILES
+    # ========================================================
+
+    with st.spinner(
+        "Reading PO Pending File..."
+    ):
+
+        po_df = read_po_file(
+            po_file
+        )
+
+    with st.spinner(
+        "Reading Schedule Date File..."
+    ):
+
+        schedule_df = read_schedule_file(
+            schedule_file
+        )
+
+    with st.spinner(
+        "Reading Barcode Master..."
+    ):
+
+        barcode_df = read_barcode_master(
+            BARCODE_MASTER_FILE
+        )
+
+    # ========================================================
+    # FINAL DATA
+    # ========================================================
+
+    with st.spinner(
+        "Preparing PO Pending Data..."
+    ):
 
         final_df = create_final_data(
             po_df,
@@ -515,208 +1576,346 @@ try:
             barcode_df
         )
 
-    # =====================================================
-    # FILTERS
-    # =====================================================
+    if final_df.empty:
 
-    st.sidebar.divider()
-    st.sidebar.header("🔍 DASHBOARD FILTERS")
+        st.warning(
+            "No PO Pending data available after removing "
+            "rows where Pending Qty is zero."
+        )
+
+        st.stop()
+
+    # ========================================================
+    # FILTERS
+    # ========================================================
+
+    st.sidebar.markdown("---")
+
+    st.sidebar.subheader(
+        "🔎 FILTERS"
+    )
+
+    filter_columns = [
+
+        "DIVISION",
+        "SECTION",
+        "DEPARTMENT",
+        "ARTCLE NAME",
+        "BRAND",
+        "VENDOR NAME",
+        "DELIVERY MNTH",
+        "BARCODE",
+        "BRCD STATUS",
+        "DELAY GROUP",
+        "DELAY GROUP2",
+        "ATTRIBUTE1",
+        "CAT-1"
+
+    ]
 
     filtered_df = final_df.copy()
 
-    filter_columns = [
-        "DIVISION",
-        "BRAND",
-        "VENDOR NAME",
-        "DEPARTMENT",
-        "DELIVERY MNTH",
-        "BRCD STATUS",
-        "DELAY GROUP2"
-    ]
+    for column in filter_columns:
 
-    for col in filter_columns:
-        options = sorted(
-            filtered_df[col]
-            .fillna("BLANK")
+        if column not in filtered_df.columns:
+
+            continue
+
+        options = (
+            filtered_df[column]
+            .dropna()
             .astype(str)
-            .unique()
-            .tolist()
+            .str.strip()
+        )
+
+        options = sorted(
+            [
+                x
+                for x in options.unique()
+                if x != ""
+            ]
         )
 
         selected = st.sidebar.multiselect(
-            col,
-            options=options,
-            default=options,
-            key=f"filter_{col}"
+            column,
+            options,
+            key=f"filter_{column}"
         )
 
-        filtered_df = filtered_df[
-            filtered_df[col]
-            .fillna("BLANK")
-            .astype(str)
-            .isin(selected)
+        if selected:
+
+            filtered_df = filtered_df[
+                filtered_df[column]
+                .astype(str)
+                .isin(selected)
+            ]
+
+    # ========================================================
+    # CLEAR FILTERS
+    # ========================================================
+
+    if st.sidebar.button(
+        "🔄 CLEAR ALL FILTERS"
+    ):
+
+        keys_to_delete = [
+            key
+            for key in st.session_state.keys()
+            if key.startswith("filter_")
         ]
 
-    # =====================================================
-    # KPI CARDS
-    # =====================================================
+        for key in keys_to_delete:
 
-    st.subheader("📌 Overall Summary")
+            del st.session_state[key]
 
-    total_order = filtered_df["ORDER QTY"].sum()
-    total_received = filtered_df["RECEIVED QTY"].sum()
-    total_cancelled = filtered_df["CANCELLED QTY"].sum()
-    total_pending = filtered_df["PENDING QTY"].sum()
-    total_pending_val = filtered_df["PENDING VAL"].sum()
-    total_pkt = filtered_df["PKT QTY"].sum()
+        st.rerun()
 
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    # ========================================================
+    # KPI
+    # ========================================================
 
-    c1.metric("Order Qty", f"{total_order:,.0f}")
-    c2.metric("Received Qty", f"{total_received:,.0f}")
-    c3.metric("Cancelled Qty", f"{total_cancelled:,.0f}")
-    c4.metric("Pending Qty", f"{total_pending:,.0f}")
-    c5.metric("Pending Value", f"₹ {total_pending_val:,.0f}")
-    c6.metric("Packet Qty", f"{total_pkt:,.2f}")
+    st.markdown(
+        "### 📌 PO Pending Summary"
+    )
 
-    # =====================================================
-    # DELAY SUMMARY
-    # =====================================================
+    col1, col2, col3 = st.columns(3)
+    col4, col5, col6 = st.columns(3)
 
-    st.divider()
+    with col1:
 
-    col_a, col_b = st.columns(2)
-
-    with col_a:
-        st.subheader("⏳ Delay Group Summary")
-
-        delay_summary = (
-            filtered_df.groupby("DELAY GROUP", dropna=False)
-            .agg(
-                **{
-                    "Pending Qty": ("PENDING QTY", "sum"),
-                    "Pending Value": ("PENDING VAL", "sum"),
-                    "Packet Qty": ("PKT QTY", "sum")
-                }
-            )
-            .reset_index()
+        st.metric(
+            "ORDER QTY",
+            f"{filtered_df['ORDER QTY'].sum():,.0f}"
         )
 
-        st.dataframe(
-            delay_summary,
-            use_container_width=True,
-            hide_index=True
+    with col2:
+
+        st.metric(
+            "RECEIVED QTY",
+            f"{filtered_df['RECEIVED QTY'].sum():,.0f}"
         )
 
-    with col_b:
-        st.subheader("🏷️ Brand-wise Pending")
+    with col3:
 
-        brand_summary = (
-            filtered_df.groupby("BRAND", dropna=False)
-            .agg(
-                **{
-                    "Pending Qty": ("PENDING QTY", "sum"),
-                    "Pending Value": ("PENDING VAL", "sum")
-                }
-            )
-            .reset_index()
-            .sort_values("Pending Qty", ascending=False)
+        st.metric(
+            "CANCELLED QTY",
+            f"{filtered_df['CANCELLED QTY'].sum():,.0f}"
         )
 
-        st.dataframe(
-            brand_summary,
-            use_container_width=True,
-            hide_index=True
+    with col4:
+
+        st.metric(
+            "PENDING QTY",
+            f"{filtered_df['PENDING QTY'].sum():,.0f}"
         )
 
-    # =====================================================
-    # VENDOR SUMMARY
-    # =====================================================
+    with col5:
 
-    st.subheader("🏭 Vendor-wise Pending")
-
-    vendor_summary = (
-        filtered_df.groupby("VENDOR NAME", dropna=False)
-        .agg(
-            **{
-                "Pending Qty": ("PENDING QTY", "sum"),
-                "Pending Value": ("PENDING VAL", "sum"),
-                "Packet Qty": ("PKT QTY", "sum")
-            }
+        st.metric(
+            "PENDING VALUE",
+            f"₹{filtered_df['PENDING VAL'].sum():,.0f}"
         )
-        .reset_index()
-        .sort_values("Pending Qty", ascending=False)
+
+    with col6:
+
+        st.metric(
+            "PACKET QTY",
+            f"{filtered_df['PKT QTY'].sum():,.2f}"
+        )
+
+    # ========================================================
+    # HIERARCHY SUMMARY
+    # ========================================================
+
+    st.markdown("---")
+
+    st.markdown(
+        "### 📊 Hierarchy Summary"
+    )
+
+    hierarchy_columns = [
+
+        "DIVISION",
+        "SECTION",
+        "DEPARTMENT",
+        "ARTCLE NAME",
+        "BRAND",
+        "DELIVERY MNTH",
+        "BARCODE",
+        "BRCD STATUS",
+        "ORDER RATE",
+        "MRP",
+        "CAT-1"
+
+    ]
+
+    hierarchy_selected = st.selectbox(
+        "Select Summary Level",
+        hierarchy_columns
+    )
+
+    hierarchy_df = create_hierarchy_summary(
+        filtered_df,
+        hierarchy_selected
     )
 
     st.dataframe(
-        vendor_summary,
+        hierarchy_df,
         use_container_width=True,
-        hide_index=True,
-        height=400
+        height=350
     )
 
-    # =====================================================
-    # PIVOT TABLES
-    # =====================================================
+    # ========================================================
+    # DRILL DOWN
+    # ========================================================
 
-    st.divider()
-    st.subheader("📊 Pivot Table Summary")
+    st.markdown("---")
 
-    pivot_tables = create_pivot_tables(filtered_df)
+    st.markdown(
+        "### 🔍 Drill Down Analysis"
+    )
 
-    pivot_tabs = st.tabs(list(pivot_tables.keys()))
+    drill_levels = [
+        "DIVISION",
+        "SECTION",
+        "DEPARTMENT",
+        "ARTCLE NAME",
+        "BRAND"
+    ]
 
-    for tab, (pivot_name, pivot_df) in zip(pivot_tabs, pivot_tables.items()):
-        with tab:
-            st.dataframe(
-                pivot_df,
-                use_container_width=True,
-                height=400
-            )
+    available_drill = [
+        col
+        for col in drill_levels
+        if col in filtered_df.columns
+    ]
 
-    # =====================================================
+    if available_drill:
+
+        drill_level = st.selectbox(
+            "Select Drill Level",
+            available_drill
+        )
+
+        drill_summary = create_hierarchy_summary(
+            filtered_df,
+            drill_level
+        )
+
+        st.dataframe(
+            drill_summary,
+            use_container_width=True,
+            height=300
+        )
+
+    # ========================================================
     # FINAL DATA
-    # =====================================================
+    # ========================================================
 
-    st.divider()
-    st.subheader("📋 Final PO Pending Data")
-    st.write(f"Total records after filters: **{len(filtered_df):,}**")
+    st.markdown("---")
+
+    st.markdown(
+        "### 📋 Final PO Pending Data"
+    )
+
+    st.caption(
+        f"Showing {len(filtered_df):,} rows"
+    )
 
     st.dataframe(
         filtered_df,
         use_container_width=True,
-        hide_index=True,
-        height=600
+        height=500
     )
 
-    # =====================================================
-    # DOWNLOAD
-    # =====================================================
+    # ========================================================
+    # DOWNLOADS
+    # ========================================================
 
-    st.divider()
+    st.markdown("---")
 
-    excel_data = create_excel_file(filtered_df)
+    st.markdown(
+        "### ⬇️ DOWNLOAD"
+    )
+
+    # ========================================================
+    # DOWNLOAD 1
+    # ========================================================
+
+    final_excel = create_final_excel(
+        filtered_df
+    )
 
     st.download_button(
-        label="⬇️ Download Final PO Pending Excel",
-        data=excel_data,
+        label="⬇️ DOWNLOAD FINAL PO PENDING",
+        data=final_excel,
         file_name="FINAL_PO_PENDING.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        mime=(
+            "application/vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet"
+        ),
+        use_container_width=True
     )
 
-    # =====================================================
-    # PIVOT DOWNLOAD
-    # =====================================================
+    # ========================================================
+    # DOWNLOAD 2 - LIVE PIVOT
+    # ========================================================
 
-    pivot_excel_data = create_pivot_excel(filtered_df)
-
-    st.download_button(
-        label="📊 Download Pivot Table Excel",
-        data=pivot_excel_data,
-        file_name="PO_PENDING_PIVOT_TABLES.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    st.markdown(
+        "### 📊 LIVE PIVOT DOWNLOAD"
     )
 
-except Exception as e:
-    st.error("An error occurred while processing the files.")
-    st.exception(e)
+    if st.button(
+        "⚙️ PREPARE LIVE PIVOT DOWNLOAD",
+        use_container_width=True
+    ):
+
+        with st.spinner(
+            "Creating Live Excel PivotTable..."
+        ):
+
+            pivot_bytes = create_pivot_excel(
+                filtered_df
+            )
+
+        st.session_state[
+            "pivot_excel"
+        ] = pivot_bytes
+
+        st.session_state[
+            "pivot_ready"
+        ] = True
+
+        st.success(
+            "Live PivotTable Excel file is ready."
+        )
+
+    if st.session_state.get(
+        "pivot_ready",
+        False
+    ):
+
+        st.download_button(
+            label="📊 DOWNLOAD PO PENDING + LIVE PIVOT",
+            data=st.session_state[
+                "pivot_excel"
+            ],
+            file_name="PO_PENDING_WITH_LIVE_PIVOT.xlsx",
+            mime=(
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
+            use_container_width=True
+        )
+
+
+# ============================================================
+# ERROR HANDLER
+# ============================================================
+
+except Exception as error:
+
+    st.error(
+        "An error occurred while processing the files."
+    )
+
+    st.exception(error)
