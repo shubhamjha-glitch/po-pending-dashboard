@@ -347,6 +347,7 @@ def create_final_data(
 ):
 
     df = po_df.copy()
+    original_input_columns = list(df.columns)
 
     # --------------------------------------------------------
     # BRAND
@@ -360,12 +361,7 @@ def create_final_data(
 
         else:
 
-            df.rename(
-                columns={
-                    "CAT-2": "BRAND"
-                },
-                inplace=True
-            )
+            df["BRAND"] = df["CAT-2"]
 
     # --------------------------------------------------------
     # REQUIRED COLUMNS
@@ -410,6 +406,7 @@ def create_final_data(
     # MERGE SCHEDULE
     # --------------------------------------------------------
 
+    df = df.drop(columns=["DELIVERY DATE", "SCHEDULE DATE"], errors="ignore")
     df = df.merge(
         schedule_df,
         left_on="ORDER NO.",
@@ -435,11 +432,18 @@ def create_final_data(
     # MERGE BARCODE MASTER
     # --------------------------------------------------------
 
+    # Look up barcode status using NEW_BAR against master BARCODE.
+    if "NEW_BAR" not in df.columns:
+        raise ValueError("PO Pending file is missing NEW_BAR for BRCD STATUS lookup.")
+    df["NEW_BAR"] = df["NEW_BAR"].apply(clean_text)
+    df = df.drop(columns=["BRCD STATUS"], errors="ignore")
+    status_lookup = barcode_df.rename(columns={"BARCODE": "_STATUS_LOOKUP_BARCODE"})
     df = df.merge(
-        barcode_df,
-        on="BARCODE",
+        status_lookup,
+        left_on="NEW_BAR",
+        right_on="_STATUS_LOOKUP_BARCODE",
         how="left"
-    )
+    ).drop(columns=["_STATUS_LOOKUP_BARCODE"])
 
     df["BRCD STATUS"] = (
         df["BRCD STATUS"]
@@ -600,9 +604,40 @@ def create_final_data(
     # FINAL ORDER
     # --------------------------------------------------------
 
-    df = df[
-        FINAL_COLUMNS
-    ]
+    # Keep the established output layout, but insert any additional input
+    # columns beside their original neighboring headers (not at the end).
+    output_columns = list(FINAL_COLUMNS)
+    input_columns = [col for col in original_input_columns if col in df.columns]
+    extra_columns = [col for col in input_columns if col not in output_columns]
+
+    for extra_col in extra_columns:
+        input_position = input_columns.index(extra_col)
+        preceding = [col for col in input_columns[:input_position]
+                     if col in output_columns]
+        following = [col for col in input_columns[input_position + 1:]
+                     if col in output_columns]
+
+        if preceding:
+            # Insert after the closest preceding input header, and after
+            # earlier new columns that were inserted at the same location.
+            anchor = preceding[-1]
+            insert_at = output_columns.index(anchor) + 1
+            while (insert_at < len(output_columns)
+                   and output_columns[insert_at] in extra_columns
+                   and input_columns.index(output_columns[insert_at]) < input_position):
+                insert_at += 1
+            output_columns.insert(insert_at, extra_col)
+        elif following:
+            output_columns.insert(output_columns.index(following[0]), extra_col)
+        else:
+            output_columns.append(extra_col)
+
+    # Position BRCD STATUS immediately after NEW_BAR.
+    if "NEW_BAR" in output_columns and "BRCD STATUS" in output_columns:
+        output_columns.remove("BRCD STATUS")
+        output_columns.insert(output_columns.index("NEW_BAR") + 1, "BRCD STATUS")
+
+    df = df[output_columns]
 
     # --------------------------------------------------------
     # SORT
@@ -1613,6 +1648,8 @@ try:
 
     ]
 
+    # Automatically add filters for newly introduced input columns.
+    filter_columns = list(dict.fromkeys(filter_columns + list(final_df.columns)))
     filtered_df = final_df.copy()
 
     for column in filter_columns:
@@ -1826,6 +1863,17 @@ try:
         use_container_width=True,
         height=500
     )
+
+    # Reset the prepared Pivot download when source data or filters change.
+    import hashlib
+    signature = hashlib.sha256(
+        pd.util.hash_pandas_object(filtered_df, index=True).values.tobytes()
+        + "|".join(filtered_df.columns).encode("utf-8")
+    ).hexdigest()
+    if st.session_state.get("pivot_signature") != signature:
+        st.session_state["pivot_signature"] = signature
+        st.session_state["pivot_ready"] = False
+        st.session_state["pivot_excel"] = None
 
     # ========================================================
     # DOWNLOADS
