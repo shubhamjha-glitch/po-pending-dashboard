@@ -250,44 +250,24 @@ def read_barcode_master(file_path):
 
     df = normalize_columns(df)
 
-    required = [
-        "BARCODE",
-        "BRCD STATUS"
-    ]
-
-    missing = [
-        col
-        for col in required
-        if col not in df.columns
-    ]
-
-    if missing:
-
+    # Accept different names used in barcode-status master files.
+    canonical = {str(c).strip().upper().replace(" ", "_"): c for c in df.columns}
+    lookup_col = next((canonical[k] for k in
+                       ("NEW_BAR", "BARCODE", "NEW_BARCODE", "ITEM_BARCODE", "BAR_CODE")
+                       if k in canonical), None)
+    status_col = next((canonical[k] for k in
+                       ("BRCD_STATUS", "BARCODE_STATUS", "STATUS")
+                       if k in canonical), None)
+    if lookup_col is None or status_col is None:
         raise ValueError(
-            "Barcode master missing columns: "
-            + ", ".join(missing)
+            "Barcode master columns not recognized. Found: "
+            + ", ".join(map(str, df.columns))
+            + ". Expected NEW_BAR or BARCODE and BRCD STATUS."
         )
-
-    df["BARCODE"] = (
-        df["BARCODE"]
-        .apply(clean_text)
-    )
-
-    df["BRCD STATUS"] = (
-        df["BRCD STATUS"]
-        .fillna("NOT FOUND")
-        .astype(str)
-        .str.strip()
-    )
-
-    df = df.drop_duplicates(
-        subset=["BARCODE"],
-        keep="last"
-    )
-
-    return df[
-        ["BARCODE", "BRCD STATUS"]
-    ]
+    df = df.rename(columns={lookup_col: "_MASTER_BARCODE", status_col: "BRCD STATUS"})
+    df["_MASTER_BARCODE"] = df["_MASTER_BARCODE"].apply(clean_text)
+    df["BRCD STATUS"] = df["BRCD STATUS"].fillna("NOT FOUND").astype(str).str.strip()
+    return df.drop_duplicates(subset=["_MASTER_BARCODE"], keep="last")[["_MASTER_BARCODE", "BRCD STATUS"]]
 
 
 # ============================================================
@@ -432,18 +412,16 @@ def create_final_data(
     # MERGE BARCODE MASTER
     # --------------------------------------------------------
 
-    # Look up barcode status using NEW_BAR against master BARCODE.
-    if "NEW_BAR" not in df.columns:
-        raise ValueError("PO Pending file is missing NEW_BAR for BRCD STATUS lookup.")
-    df["NEW_BAR"] = df["NEW_BAR"].apply(clean_text)
+    # Prefer NEW_BAR, but retain compatibility with older PO input files.
+    lookup_field = "NEW_BAR" if "NEW_BAR" in df.columns else "BARCODE"
+    df[lookup_field] = df[lookup_field].apply(clean_text)
     df = df.drop(columns=["BRCD STATUS"], errors="ignore")
-    status_lookup = barcode_df.rename(columns={"BARCODE": "_STATUS_LOOKUP_BARCODE"})
     df = df.merge(
-        status_lookup,
-        left_on="NEW_BAR",
-        right_on="_STATUS_LOOKUP_BARCODE",
+        barcode_df,
+        left_on=lookup_field,
+        right_on="_MASTER_BARCODE",
         how="left"
-    ).drop(columns=["_STATUS_LOOKUP_BARCODE"])
+    ).drop(columns=["_MASTER_BARCODE"])
 
     df["BRCD STATUS"] = (
         df["BRCD STATUS"]
@@ -632,8 +610,8 @@ def create_final_data(
         else:
             output_columns.append(extra_col)
 
-    # Position BRCD STATUS immediately after NEW_BAR.
-    if "NEW_BAR" in output_columns and "BRCD STATUS" in output_columns:
+    # Show BRCD STATUS directly after NEW_BAR, when NEW_BAR is supplied.
+    if "NEW_BAR" in output_columns:
         output_columns.remove("BRCD STATUS")
         output_columns.insert(output_columns.index("NEW_BAR") + 1, "BRCD STATUS")
 
