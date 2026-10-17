@@ -586,7 +586,7 @@ def create_final_data(
     # columns beside their original neighboring headers (not at the end).
     output_columns = list(FINAL_COLUMNS)
     input_columns = [col for col in original_input_columns if col in df.columns]
-    extra_columns = [col for col in input_columns if col not in output_columns]
+    extra_columns = [col for col in input_columns if col not in output_columns and col != "CAT-2"]
 
     for extra_col in extra_columns:
         input_position = input_columns.index(extra_col)
@@ -615,6 +615,8 @@ def create_final_data(
         output_columns.remove("BRCD STATUS")
         output_columns.insert(output_columns.index("NEW_BAR") + 1, "BRCD STATUS")
 
+    # CAT-2 is represented by BRAND; do not export CAT-2 separately.
+    output_columns = [col for col in output_columns if col != "CAT-2"]
     df = df[output_columns]
 
     # --------------------------------------------------------
